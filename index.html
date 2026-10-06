@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <title>Rust + WASM Tree BBS</title>
+  <style>
+    :root { --bg: #1e1e1e; --sidebar: #252526; --border: #333; --text: #ccc; --active: #007acc; }
+    * { box-sizing: border-box; margin: 0; padding: 0; font-family: monospace; }
+    body { display: flex; height: 100vh; background: var(--bg); color: var(--text); overflow: hidden; }
+    #sidebar { width: 260px; background: var(--sidebar); border-right: 1px solid var(--border); display: flex; flex-direction: column; }
+    .header { padding: 10px; font-size: 11px; font-weight: bold; border-bottom: 1px solid var(--border); }
+    #tree-list { flex: 1; list-style: none; overflow-y: auto; }
+    .tree-item { padding: 8px 12px; cursor: pointer; display: flex; justify-content: space-between; }
+    .tree-item.active { background: #37373d; color: #fff; border-left: 2px solid var(--active); }
+    #main { flex: 1; display: flex; flex-direction: column; }
+    #messages { flex: 1; padding: 15px; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; }
+    .msg-card { background: var(--sidebar); border-left: 3px solid var(--active); padding: 8px; }
+    #form { padding: 10px; background: var(--sidebar); border-top: 1px solid var(--border); display: flex; gap: 8px; }
+    input, button { background: #333; border: 1px solid var(--border); color: #fff; padding: 6px; }
+  </style>
+</head>
+<body>
+  <div id="sidebar">
+    <div class="header">🦀 RUST WASM TREE BBS</div>
+    <ul id="tree-list"></ul>
+    <button onclick="createBoard()" style="margin:8px;font-size:11px;">+ 新しい板</button>
+  </div>
+  <div id="main">
+    <div style="padding:8px;background:var(--bg);border-bottom:1px solid var(--border)" id="tab-title">board: general</div>
+    <div id="messages"></div>
+    <form id="form" onsubmit="sendPost(event)">
+      <input type="text" id="name" value="名無し" style="width:80px">
+      <input type="text" id="content" placeholder="Rust WASMで処理されます..." style="flex:1" required>
+      <button type="submit" style="background:var(--active);cursor:pointer">送信</button>
+    </form>
+  </div>
+  <script type="module">
+    import init, { BoardEngine } from './pkg/wasm_tree_bbs.js';
+    import { SimplePool, finalizeEvent, generateSecretKey } from 'https://esm.sh/nostr-tools@2.7.2';
+
+    let engine;
+    let activeBoard = "general";
+    const APP_TAG = "rust-wasm-tree-bbs-v1";
+    const RELAYS = ['wss://relay.damus.io', 'wss://yabu.me'];
+    const pool = new SimplePool();
+    const sk = generateSecretKey();
+
+    async function run() {
+      await init();
+      engine = new BoardEngine();
+      renderTree();
+
+      pool.subscribeMany(RELAYS, [{ kinds: [1], '#t': [APP_TAG] }], {
+        onevent(event) {
+          const bTag = event.tags.find(t => t[0] === 'b');
+          const authorTag = event.tags.find(t => t[0] === 'author');
+          const board = bTag ? bTag[1] : "general";
+          const author = authorTag ? authorTag[1] : "名無し";
+
+          engine.add_post(board, event.id, author, event.content, BigInt(event.created_at * 1000));
+          renderTree();
+          if (activeBoard === board) renderMessages();
+        }
+      });
+    }
+
+    function renderTree() {
+      const boards = JSON.parse(engine.get_sorted_boards_json());
+      const list = document.getElementById("tree-list");
+      list.innerHTML = "";
+      if (boards.length === 0) {
+        list.innerHTML = `<li class="tree-item active"><span>📄 general.rs</span></li>`;
+        return;
+      }
+      boards.forEach(b => {
+        const li = document.createElement("li");
+        li.className = `tree-item ${b.name === activeBoard ? 'active' : ''}`;
+        li.innerHTML = `<span>📄 ${b.name}.rs</span> <span style="font-size:10px;color:#888">${b.post_count}</span>`;
+        li.onclick = () => {
+          activeBoard = b.name;
+          document.getElementById("tab-title").innerText = `board: ${b.name}`;
+          renderTree();
+          renderMessages();
+        };
+        list.appendChild(li);
+      });
+    }
+
+    function renderMessages() {
+      const posts = JSON.parse(engine.get_posts_json(activeBoard));
+      const container = document.getElementById("messages");
+      container.innerHTML = "";
+      posts.forEach(p => {
+        const d = document.createElement("div");
+        d.className = "msg-card";
+        d.innerHTML = `<div style="font-size:10px;color:#888">${p.author} • ${new Date(p.time).toLocaleTimeString()}</div><div>${p.text}</div>`;
+        container.appendChild(d);
+      });
+      container.scrollTop = container.scrollHeight;
+    }
+
+    window.sendPost = async function(e) {
+      e.preventDefault();
+      const input = document.getElementById("content");
+      const name = document.getElementById("name").value;
+      const text = input.value;
+      input.value = "";
+
+      const eventTemplate = {
+        kind: 1,
+        created_at: Math.floor(Date.now() / 1000),
+        tags: [["t", APP_TAG], ["b", activeBoard], ["author", name]],
+        content: text
+      };
+      const signed = finalizeEvent(eventTemplate, sk);
+      engine.add_post(activeBoard, signed.id, name, text, BigInt(signed.created_at * 1000));
+      renderTree();
+      renderMessages();
+      await Promise.any(pool.publish(RELAYS, signed));
+    };
+
+    window.createBoard = function() {
+      const name = prompt("板の名前:");
+      if (!name) return;
+      activeBoard = name.trim();
+      engine.add_post(activeBoard, "init", "system", "板が作成されました", BigInt(Date.now()));
+      renderTree();
+      renderMessages();
+    };
+
+    run();
+  </script>
+</body>
+</html>
